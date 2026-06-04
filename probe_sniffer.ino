@@ -18,7 +18,9 @@ int current_scanning_channel = 1;
 
 // --- Sniffer Callback Function ---
 void sniffer_callback(void* buf, wifi_promiscuous_pkt_type_t type) {
-  if (type != 0) return; // Skip if it's not a Management or Data packet
+  // Filter out control (ACK/CTS) and misc frames. 
+  // We must allow both MGMT (for Probes/Beacons) and DATA (for active traffic) to pass through.
+  if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
 
   wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
   uint8_t *payload = pkt->payload;
