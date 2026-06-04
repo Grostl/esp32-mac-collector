@@ -76,7 +76,7 @@ void setup() {
   
   Serial.print("Mounting SD Card...");
   // 16MHz frequency for fast file checking and writes
-  delay(200); // Даем время шине стабилизироваться
+  delay(200); // Allow SPI bus voltage to stabilize
   if (!SD.begin(SD_CS, spiSD, 4000000)) { 
     Serial.println(" FAILED!");
     // RED INDICATOR: SD Card mount error
