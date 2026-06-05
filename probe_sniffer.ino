@@ -40,18 +40,21 @@ struct DedupRecord {
 };
 
 // --- Global Variables ---
-SPIClass      spiSD(FSPI);
-char          activeFileName[32];
+SPIClass          spiSD(FSPI);
+char              activeFileName[32];
 volatile uint8_t  currentScanningChannel = 1; // Written in loop(), read in callback
 volatile uint32_t ledOnUntilMs = 0;           // Set in callback, consumed in loop()
-QueueHandle_t logQueue;
+QueueHandle_t     logQueue;
 
 // Static dedup ring buffer — no heap allocations, no fragmentation
 static DedupRecord dedupBuffer[DEDUP_MAX_DEVICES];
 static uint16_t    nextDedupIndex = 0;
 
-// Log rotation counter — tracks records written to the current file
-static uint32_t logEntryCount = 0;
+// Log rotation counter and file index.
+// currentFileIndex is set once in setup() and incremented on each rotation —
+// avoids expensive SD.exists() loop after many files have been created.
+static uint32_t logEntryCount   = 0;
+static int      currentFileIndex = 0;
 
 // --- MAC Validation ---
 // Rejects zero MACs, broadcast (FF:FF:...), and multicast (LSB of first byte = 1).
@@ -70,7 +73,6 @@ bool isDuplicateMac(const uint8_t mac[6], uint32_t now) {
   int reusableSlot = -1;
 
   for (int i = 0; i < DEDUP_MAX_DEVICES; i++) {
-    // Empty slot — candidate for reuse but keep scanning for existing entry
     if (dedupBuffer[i].last_seen == 0) {
       if (reusableSlot < 0) reusableSlot = i;
       continue;
@@ -84,7 +86,6 @@ bool isDuplicateMac(const uint8_t mac[6], uint32_t now) {
       return false;
     }
 
-    // Track expired slots as reuse candidates
     if (reusableSlot < 0 && now - dedupBuffer[i].last_seen >= MAC_DEDUP_INTERVAL_MS) {
       reusableSlot = i;
     }
@@ -106,18 +107,15 @@ void formatMac(const uint8_t mac[6], char out[18]) {
 }
 
 // --- Log File Rotation ---
-// Creates a new CSV file and resets the entry counter.
-// Called automatically when MAX_LOG_ENTRIES is reached.
+// Increments currentFileIndex instead of re-scanning SD with exists() —
+// avoids multi-second freeze when hundreds of log files already exist.
+// After rotation the current batch is always broken so the next batch
+// starts cleanly at the top of the new file, right after the header row.
 void rotateLogFile() {
   logEntryCount = 0;
+  currentFileIndex++;
 
-  int n = 0;
-  strncpy(activeFileName, "/log.csv", sizeof(activeFileName));
-  activeFileName[sizeof(activeFileName) - 1] = '\0';
-  while (SD.exists(activeFileName)) {
-    n++;
-    snprintf(activeFileName, sizeof(activeFileName), "/log_%d.csv", n);
-  }
+  snprintf(activeFileName, sizeof(activeFileName), "/log_%d.csv", currentFileIndex);
 
   File newFile = SD.open(activeFileName, FILE_WRITE);
   if (newFile) {
@@ -195,7 +193,8 @@ void snifferCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
 // --- Queue Drain and SD Logger ---
 // Runs in loop() context — SD and Serial are safe here.
 // File opened once per batch to minimise slow SPI open/close cycles.
-// Rotates to a new file automatically after MAX_LOG_ENTRIES records.
+// On rotation: closes current file, calls rotateLogFile(), then breaks
+// the batch immediately so the next batch starts cleanly in the new file.
 void flushQueueToSD() {
   LogEntry entry;
   File     logFile;
@@ -228,11 +227,14 @@ void flushQueueToSD() {
 
       logEntryCount++;
 
-      // Rotate log file when entry limit is reached
+      // Rotate when entry limit is reached.
+      // Break immediately so remaining queue entries go into the new file
+      // on the next flushQueueToSD() call — file handles never overlap.
       if (logEntryCount >= MAX_LOG_ENTRIES) {
         logFile.close();
         isFileOpen = false;
         rotateLogFile();
+        break;
       }
     } else {
       Serial.println("ERROR: log file append failed");
@@ -286,7 +288,8 @@ void setup() {
   Serial.println(" SUCCESS!");
   neopixelWrite(LED_PIN, 0, 150, 0); // Green: SD ready
 
-  // Auto-increment log filename: /log.csv -> /log_1.csv -> /log_2.csv ...
+  // Find the first free filename and remember the index for fast rotation later.
+  // This SD.exists() loop runs only once at boot — rotation uses currentFileIndex++.
   int n = 0;
   strncpy(activeFileName, "/log.csv", sizeof(activeFileName));
   activeFileName[sizeof(activeFileName) - 1] = '\0';
@@ -294,6 +297,7 @@ void setup() {
     n++;
     snprintf(activeFileName, sizeof(activeFileName), "/log_%d.csv", n);
   }
+  currentFileIndex = n; // Anchor for rotation — no SD.exists() needed after this
 
   File logFile = SD.open(activeFileName, FILE_WRITE);
   if (!logFile) {
@@ -312,9 +316,14 @@ void setup() {
   esp_err_t nvsResult = nvs_flash_init();
   if (nvsResult == ESP_ERR_NVS_NO_FREE_PAGES || nvsResult == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     nvs_flash_erase();
+    delay(100);
     nvsResult = nvs_flash_init();
   }
   if (!checkEsp(nvsResult, "nvs_flash_init")) while (true) delay(1000);
+
+  // Clean up any leftover Wi-Fi state from previous session
+  esp_wifi_stop();
+  esp_wifi_deinit();
 
   // Initialize Wi-Fi in promiscuous (monitor) mode
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
