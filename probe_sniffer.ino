@@ -52,8 +52,8 @@ static DedupRecord dedupBuffer[DEDUP_MAX_DEVICES];
 static uint16_t    nextDedupIndex = 0;
 
 // Log rotation state.
-// currentFileIndex is anchored in setup() past all existing files,
-// then incremented directly on each rotation — no SD.exists() during runtime.
+// currentFileIndex is managed by makeNextLogFileName() which is the single
+// source of truth for filename selection — called at boot and on every rotation.
 // sdError halts logging if file creation fails to prevent writes to a bad path.
 static uint32_t logEntryCount    = 0;
 static int      currentFileIndex = 0;
@@ -109,16 +109,31 @@ void formatMac(const uint8_t mac[6], char out[18]) {
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
+// --- Filename Selection ---
+// Find the next free log filename.
+// Uses the first available name and skips occupied names during rotation —
+// gaps in numbering are acceptable, existing files are never overwritten.
+void makeNextLogFileName() {
+  if (!SD.exists("/log.csv")) {
+    strncpy(activeFileName, "/log.csv", sizeof(activeFileName));
+    activeFileName[sizeof(activeFileName) - 1] = '\0';
+    currentFileIndex = 0;
+    return;
+  }
+
+  // Step forward from the current index until a free filename is found
+  do {
+    currentFileIndex++;
+    snprintf(activeFileName, sizeof(activeFileName), "/log_%d.csv", currentFileIndex);
+  } while (SD.exists(activeFileName));
+}
+
 // --- Log File Rotation ---
-// Increments currentFileIndex directly — setup() already anchored it past
-// all existing files at boot, so no SD.exists() loop is needed at runtime.
-// activeFileName is updated only after confirming the new file was created.
-// On failure sdError is set to halt logging and prevent writes to a bad path.
+// Delegates filename selection to makeNextLogFileName() — no duplicate logic.
+// activeFileName is updated before SD.open(); sdError halts logging on failure.
 void rotateLogFile() {
   logEntryCount = 0;
-  currentFileIndex++;
-
-  snprintf(activeFileName, sizeof(activeFileName), "/log_%d.csv", currentFileIndex);
+  makeNextLogFileName();
 
   File newFile = SD.open(activeFileName, FILE_WRITE);
   if (newFile) {
@@ -297,17 +312,8 @@ void setup() {
   Serial.println(" SUCCESS!");
   neopixelWrite(LED_PIN, 0, 150, 0); // Green: SD ready
 
-  // Scan for the first free filename at boot and anchor currentFileIndex.
-  // This SD.exists() loop runs only once — all subsequent rotations use
-  // currentFileIndex++ directly with no filesystem scanning.
-  int n = 0;
-  strncpy(activeFileName, "/log.csv", sizeof(activeFileName));
-  activeFileName[sizeof(activeFileName) - 1] = '\0';
-  while (SD.exists(activeFileName)) {
-    n++;
-    snprintf(activeFileName, sizeof(activeFileName), "/log_%d.csv", n);
-  }
-  currentFileIndex = n;
+  // Select the first free log filename — same logic used at boot and rotation
+  makeNextLogFileName();
 
   File logFile = SD.open(activeFileName, FILE_WRITE);
   if (!logFile) {
