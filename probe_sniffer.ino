@@ -4,8 +4,6 @@
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "freertos/queue.h"
-#include "map"
-#include "string"
 
 // --- Pin Configuration ---
 #define SD_MISO  2
@@ -17,28 +15,57 @@
 // --- Deduplication interval: one log entry per MAC per 30 seconds ---
 #define MAC_DEDUP_INTERVAL_MS 30000
 
-// --- Single log record structure ---
+// --- Optimized log record: 12 bytes instead of 32 ---
+// Raw MAC bytes instead of formatted char[18] string saves memory
+// and avoids slow snprintf() inside the Wi-Fi callback
 struct LogEntry {
   uint32_t time_ms;
   uint8_t  channel;
   int8_t   rssi;
   uint8_t  frame_type;
-  char     mac[18];
+  uint8_t  mac[6]; // Raw 6-byte MAC address
 };
 
 // --- Global Variables ---
 SPIClass      spiSD(FSPI);
 char          activeFileName[32];
 volatile int  current_scanning_channel = 1; // volatile: written in loop(), read in callback
-QueueHandle_t logQueue;                      // thread-safe bridge between callback and loop()
+QueueHandle_t logQueue;                      // Thread-safe bridge between callback and loop()
 
-// MAC address -> last seen timestamp (ms)
-// Used to suppress duplicate entries for the same device
-std::map<std::string, uint32_t> seenMacs;
+// --- Static Deduplication Ring Buffer ---
+// Fixed-size array instead of std::map to avoid heap fragmentation.
+// Automatically overwrites the oldest entry when full (circular buffer).
+struct DedupRecord {
+  uint8_t  mac[6];
+  uint32_t last_seen; // millis() timestamp of last log entry
+};
+#define DEDUP_MAX_DEVICES 512
+static DedupRecord dedupBuffer[DEDUP_MAX_DEVICES];
+static int         nextDedupIndex = 0;
+
+// Check if MAC was seen recently. Updates timestamp if expired.
+// Uses memcmp for fast raw byte comparison — no string operations needed.
+bool isDuplicate(const uint8_t* macBytes, uint32_t now) {
+  for (int i = 0; i < DEDUP_MAX_DEVICES; i++) {
+    if (memcmp(dedupBuffer[i].mac, macBytes, 6) == 0) {
+      if (now - dedupBuffer[i].last_seen < MAC_DEDUP_INTERVAL_MS) {
+        return true; // Seen recently — suppress
+      }
+      // Interval expired — update timestamp and allow logging
+      dedupBuffer[i].last_seen = now;
+      return false;
+    }
+  }
+  // New MAC — write into next slot in the ring buffer
+  memcpy(dedupBuffer[nextDedupIndex].mac, macBytes, 6);
+  dedupBuffer[nextDedupIndex].last_seen = now;
+  nextDedupIndex = (nextDedupIndex + 1) % DEDUP_MAX_DEVICES;
+  return false;
+}
 
 // --- Promiscuous Sniffer Callback ---
 // Called from a high-priority Wi-Fi task.
-// Rule: NO slow operations here (SD, Serial) — only push to queue!
+// Rule: NO slow operations here (SD, Serial, snprintf) — only push to queue!
 void sniffer_callback(void* buf, wifi_promiscuous_pkt_type_t type) {
   // Level 1: allow only Management and Data frames, drop Control/Misc
   if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
@@ -57,16 +84,13 @@ void sniffer_callback(void* buf, wifi_promiscuous_pkt_type_t type) {
   // Drop weak signals and null/broadcast MACs
   if (rssi <= -95 || payload[10] == 0x00) return;
 
-  // Fill the log entry struct
-  // Transmitter MAC address starts at byte offset 10 in Mgmt/Data frames
+  // Fill the log entry with raw bytes — no string formatting in ISR context
   LogEntry entry;
   entry.time_ms    = millis();
   entry.channel    = (uint8_t)current_scanning_channel;
   entry.rssi       = rssi;
   entry.frame_type = frameType;
-  snprintf(entry.mac, sizeof(entry.mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-           payload[10], payload[11], payload[12],
-           payload[13], payload[14], payload[15]);
+  memcpy(entry.mac, &payload[10], 6); // Fast raw byte copy
 
   // Push to queue without blocking.
   // If queue is full — packet is silently dropped, which is acceptable.
@@ -76,49 +100,61 @@ void sniffer_callback(void* buf, wifi_promiscuous_pkt_type_t type) {
   neopixelWrite(LED_PIN, 0, 0, 20);
 }
 
-// --- Helper: drain the queue and write entries to SD ---
-// Limited to 20 entries per call to prevent blocking channel hops.
-// Remaining entries will be processed on the next call.
+// --- Helper: drain the queue and write a batch of entries to SD ---
+// Key optimizations:
+// 1. SD file opened ONCE per batch, not once per packet
+// 2. Deduplication happens before any string formatting
+// 3. Limited to 20 entries per call to prevent blocking channel hops
 void flushQueueToSD() {
   LogEntry entry;
-  int processed = 0;
+  int      processed  = 0;
+  File     logFile;
+  bool     isFileOpen = false;
+  uint32_t now        = millis();
 
   while (processed < 20 && xQueueReceive(logQueue, &entry, 0) == pdTRUE) {
     processed++;
-    std::string mac(entry.mac);
-    uint32_t now = millis();
 
-    // Deduplication check: skip if this MAC was logged recently
-    auto it = seenMacs.find(mac);
-    if (it != seenMacs.end() && (now - it->second) < MAC_DEDUP_INTERVAL_MS) {
-      neopixelWrite(LED_PIN, 0, 0, 0);
-      continue; // Too soon — drop this entry
+    // Deduplication check using raw bytes — fast memcmp, no string allocation
+    if (isDuplicate(entry.mac, now)) {
+      continue; // Seen recently — skip without any SD or Serial activity
     }
 
-    // New or expired MAC — update the timestamp and log it
-    seenMacs[mac] = now;
+    // Format MAC string only here, when we are certain this entry will be logged
+    char macStr[18];
+    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+             entry.mac[0], entry.mac[1], entry.mac[2],
+             entry.mac[3], entry.mac[4], entry.mac[5]);
 
-    // Safe to use SD here — we are in the main task context, not the Wi-Fi callback
-    File logFile = SD.open(activeFileName, FILE_APPEND);
+    // Open SD file once for the entire batch, not on every packet
+    if (!isFileOpen) {
+      logFile    = SD.open(activeFileName, FILE_APPEND);
+      isFileOpen = true;
+    }
+
     if (logFile) {
       logFile.printf("%lu;%d;%d;%s\n",
                      entry.time_ms,
                      (int)entry.channel,
                      (int)entry.rssi,
-                     entry.mac);
-      logFile.close();
+                     macStr);
     }
 
-    // Serial output is also safe here
+    // Serial output is safe here — we are in the main task context
     Serial.printf("[Type: 0x%02X][CH %2d] RSSI: %3d | MAC: %s\r\n",
                   entry.frame_type,
                   (int)entry.channel,
                   (int)entry.rssi,
-                  entry.mac);
-
-    // Turn off LED after successful write
-    neopixelWrite(LED_PIN, 0, 0, 0);
+                  macStr);
   }
+
+  // Close SD file once after the entire batch is written
+  if (isFileOpen && logFile) {
+    logFile.close();
+  }
+
+  // Turn off LED after processing the full batch
+  neopixelWrite(LED_PIN, 0, 0, 0);
 }
 
 void setup() {
@@ -133,7 +169,11 @@ void setup() {
   // Suppress verbose Wi-Fi driver logs
   esp_log_level_set("wifi", ESP_LOG_NONE);
 
-  // Create the FreeRTOS queue — 128 slots, ~3KB RAM total
+  // Zero out dedup buffer — ensures clean state on boot
+  memset(dedupBuffer, 0, sizeof(dedupBuffer));
+
+  // Create the FreeRTOS queue — 128 slots
+  // 128 * 12 bytes (LogEntry) = ~1.5KB RAM
   logQueue = xQueueCreate(128, sizeof(LogEntry));
   if (logQueue == NULL) {
     Serial.println("ERROR: Queue create FAILED!");
@@ -188,7 +228,7 @@ void setup() {
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_promiscuous_rx_cb(&sniffer_callback);
 
-  // Clear any packets captured during setup before entering the main loop
+  // Discard any packets captured during setup() to keep Serial output clean
   xQueueReset(logQueue);
 
   Serial.println("Sniffing started!");
@@ -206,20 +246,8 @@ void loop() {
   };
   static const int numChannels = sizeof(channels) / sizeof(channels[0]);
 
-  // Periodically purge expired entries from the dedup map (~every 60s).
-  // Prevents unbounded RAM growth in long-running sessions.
-  static uint32_t lastPurge = 0;
-  if (millis() - lastPurge > 60000) {
-    lastPurge = millis();
-    uint32_t now = millis();
-    for (auto it = seenMacs.begin(); it != seenMacs.end(); ) {
-      if (now - it->second > MAC_DEDUP_INTERVAL_MS) {
-        it = seenMacs.erase(it); // Remove stale entry
-      } else {
-        ++it;
-      }
-    }
-  }
+  // No lastPurge block needed — dedupBuffer is a fixed ring buffer
+  // that automatically overwrites the oldest entry, requiring zero maintenance
 
   for (int i = 0; i < numChannels; i++) {
     current_scanning_channel = channels[i];
