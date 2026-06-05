@@ -24,7 +24,8 @@
 #define MAX_LOG_ENTRIES        500000UL // Rotate to a new file after this many records
 
 // --- Compact Log Record ---
-// MAC stored as 6 raw bytes; formatted string built only when writing to CSV
+// MAC stored as 6 raw bytes; formatted string built only when writing to CSV.
+// Note: due to struct alignment actual size may be ~16 bytes, queue ~4KB RAM.
 struct LogEntry {
   uint32_t time_ms;
   uint8_t  channel;
@@ -50,11 +51,13 @@ QueueHandle_t     logQueue;
 static DedupRecord dedupBuffer[DEDUP_MAX_DEVICES];
 static uint16_t    nextDedupIndex = 0;
 
-// Log rotation counter and file index.
-// currentFileIndex is set once in setup() and incremented on each rotation —
-// avoids expensive SD.exists() loop after many files have been created.
-static uint32_t logEntryCount   = 0;
+// Log rotation state.
+// currentFileIndex is anchored in setup() past all existing files,
+// then incremented directly on each rotation — no SD.exists() during runtime.
+// sdError halts logging if file creation fails to prevent writes to a bad path.
+static uint32_t logEntryCount    = 0;
 static int      currentFileIndex = 0;
+static bool     sdError          = false;
 
 // --- MAC Validation ---
 // Rejects zero MACs, broadcast (FF:FF:...), and multicast (LSB of first byte = 1).
@@ -107,10 +110,10 @@ void formatMac(const uint8_t mac[6], char out[18]) {
 }
 
 // --- Log File Rotation ---
-// Increments currentFileIndex instead of re-scanning SD with exists() —
-// avoids multi-second freeze when hundreds of log files already exist.
-// After rotation the current batch is always broken so the next batch
-// starts cleanly at the top of the new file, right after the header row.
+// Increments currentFileIndex directly — setup() already anchored it past
+// all existing files at boot, so no SD.exists() loop is needed at runtime.
+// activeFileName is updated only after confirming the new file was created.
+// On failure sdError is set to halt logging and prevent writes to a bad path.
 void rotateLogFile() {
   logEntryCount = 0;
   currentFileIndex++;
@@ -123,8 +126,9 @@ void rotateLogFile() {
     newFile.close();
     Serial.printf("Log rotated: %s\r\n", activeFileName);
   } else {
-    Serial.println("ERROR: log rotation failed — file create error");
+    Serial.println("ERROR: log rotation failed — logging halted");
     neopixelWrite(LED_PIN, 200, 0, 0);
+    sdError = true;
   }
 }
 
@@ -194,8 +198,11 @@ void snifferCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
 // Runs in loop() context — SD and Serial are safe here.
 // File opened once per batch to minimise slow SPI open/close cycles.
 // On rotation: closes current file, calls rotateLogFile(), then breaks
-// the batch immediately so the next batch starts cleanly in the new file.
+// the batch so the next batch starts cleanly in the new file.
+// Skips all work if sdError is set.
 void flushQueueToSD() {
+  if (sdError) return;
+
   LogEntry entry;
   File     logFile;
   bool     isFileOpen = false;
@@ -239,6 +246,7 @@ void flushQueueToSD() {
     } else {
       Serial.println("ERROR: log file append failed");
       neopixelWrite(LED_PIN, 200, 0, 0);
+      sdError = true;
       break;
     }
 
@@ -268,7 +276,8 @@ void setup() {
   // Zero out dedup buffer for a clean boot state
   memset(dedupBuffer, 0, sizeof(dedupBuffer));
 
-  // Create FreeRTOS queue — 256 * 12 bytes = ~3KB RAM
+  // Create FreeRTOS queue — LOG_QUEUE_SIZE(256) slots * ~16 bytes per LogEntry = ~4KB RAM
+  // Dedup buffer: DEDUP_MAX_DEVICES(512) * 10 bytes per DedupRecord = ~5KB RAM
   logQueue = xQueueCreate(LOG_QUEUE_SIZE, sizeof(LogEntry));
   if (logQueue == NULL) {
     Serial.println("ERROR: Queue create FAILED!");
@@ -288,8 +297,9 @@ void setup() {
   Serial.println(" SUCCESS!");
   neopixelWrite(LED_PIN, 0, 150, 0); // Green: SD ready
 
-  // Find the first free filename and remember the index for fast rotation later.
-  // This SD.exists() loop runs only once at boot — rotation uses currentFileIndex++.
+  // Scan for the first free filename at boot and anchor currentFileIndex.
+  // This SD.exists() loop runs only once — all subsequent rotations use
+  // currentFileIndex++ directly with no filesystem scanning.
   int n = 0;
   strncpy(activeFileName, "/log.csv", sizeof(activeFileName));
   activeFileName[sizeof(activeFileName) - 1] = '\0';
@@ -297,7 +307,7 @@ void setup() {
     n++;
     snprintf(activeFileName, sizeof(activeFileName), "/log_%d.csv", n);
   }
-  currentFileIndex = n; // Anchor for rotation — no SD.exists() needed after this
+  currentFileIndex = n;
 
   File logFile = SD.open(activeFileName, FILE_WRITE);
   if (!logFile) {
@@ -327,13 +337,13 @@ void setup() {
 
   // Initialize Wi-Fi in promiscuous (monitor) mode
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-  if (!checkEsp(esp_wifi_init(&cfg),                           "esp_wifi_init"))         while (true) delay(1000);
-  if (!checkEsp(esp_wifi_set_storage(WIFI_STORAGE_RAM),        "esp_wifi_set_storage"))  while (true) delay(1000);
-  if (!checkEsp(esp_wifi_set_mode(WIFI_MODE_NULL),             "esp_wifi_set_mode"))     while (true) delay(1000);
-  if (!checkEsp(esp_wifi_start(),                              "esp_wifi_start"))        while (true) delay(1000);
-  if (!checkEsp(esp_wifi_set_ps(WIFI_PS_NONE),                 "esp_wifi_set_ps"))       while (true) delay(1000);
-  if (!checkEsp(esp_wifi_set_promiscuous_rx_cb(&snifferCallback), "set_promiscuous_cb")) while (true) delay(1000);
-  if (!checkEsp(esp_wifi_set_promiscuous(true),                "set_promiscuous"))       while (true) delay(1000);
+  if (!checkEsp(esp_wifi_init(&cfg),                              "esp_wifi_init"))        while (true) delay(1000);
+  if (!checkEsp(esp_wifi_set_storage(WIFI_STORAGE_RAM),          "esp_wifi_set_storage")) while (true) delay(1000);
+  if (!checkEsp(esp_wifi_set_mode(WIFI_MODE_NULL),               "esp_wifi_set_mode"))    while (true) delay(1000);
+  if (!checkEsp(esp_wifi_start(),                                "esp_wifi_start"))       while (true) delay(1000);
+  if (!checkEsp(esp_wifi_set_ps(WIFI_PS_NONE),                   "esp_wifi_set_ps"))      while (true) delay(1000);
+  if (!checkEsp(esp_wifi_set_promiscuous_rx_cb(&snifferCallback), "set_promiscuous_cb"))  while (true) delay(1000);
+  if (!checkEsp(esp_wifi_set_promiscuous(true),                  "set_promiscuous"))      while (true) delay(1000);
 
   // Discard packets captured during setup() to keep Serial output clean
   xQueueReset(logQueue);
