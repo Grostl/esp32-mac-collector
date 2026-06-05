@@ -21,6 +21,7 @@
 #define LOG_BATCH_LIMIT        32       // Max SD writes per flushQueueToSD() call
 #define MIN_RSSI_DBM           -95      // Drop frames weaker than this
 #define LED_FLASH_MS           25       // Capture LED flash duration
+#define MAX_LOG_ENTRIES        500000UL // Rotate to a new file after this many records
 
 // --- Compact Log Record ---
 // MAC stored as 6 raw bytes; formatted string built only when writing to CSV
@@ -48,6 +49,9 @@ QueueHandle_t logQueue;
 // Static dedup ring buffer — no heap allocations, no fragmentation
 static DedupRecord dedupBuffer[DEDUP_MAX_DEVICES];
 static uint16_t    nextDedupIndex = 0;
+
+// Log rotation counter — tracks records written to the current file
+static uint32_t logEntryCount = 0;
 
 // --- MAC Validation ---
 // Rejects zero MACs, broadcast (FF:FF:...), and multicast (LSB of first byte = 1).
@@ -101,6 +105,31 @@ void formatMac(const uint8_t mac[6], char out[18]) {
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
+// --- Log File Rotation ---
+// Creates a new CSV file and resets the entry counter.
+// Called automatically when MAX_LOG_ENTRIES is reached.
+void rotateLogFile() {
+  logEntryCount = 0;
+
+  int n = 0;
+  strncpy(activeFileName, "/log.csv", sizeof(activeFileName));
+  activeFileName[sizeof(activeFileName) - 1] = '\0';
+  while (SD.exists(activeFileName)) {
+    n++;
+    snprintf(activeFileName, sizeof(activeFileName), "/log_%d.csv", n);
+  }
+
+  File newFile = SD.open(activeFileName, FILE_WRITE);
+  if (newFile) {
+    newFile.println("Time_ms;Channel;RSSI;FrameType;MAC");
+    newFile.close();
+    Serial.printf("Log rotated: %s\r\n", activeFileName);
+  } else {
+    Serial.println("ERROR: log rotation failed — file create error");
+    neopixelWrite(LED_PIN, 200, 0, 0);
+  }
+}
+
 // --- LED Service ---
 // The callback only sets ledOnUntilMs; actual neopixelWrite() runs from loop().
 // This keeps the flash visible without blocking the Wi-Fi task.
@@ -150,7 +179,7 @@ void snifferCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
 
   LogEntry entry;
   entry.time_ms    = millis();
-  // Prefer the channel reported in the packet itself; fall back to the scan variable
+  // Prefer the channel reported in the packet itself; fall back to scan variable
   entry.channel    = pkt->rx_ctrl.channel ? pkt->rx_ctrl.channel : currentScanningChannel;
   entry.rssi       = rssi;
   entry.frame_type = frameType;
@@ -166,6 +195,7 @@ void snifferCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
 // --- Queue Drain and SD Logger ---
 // Runs in loop() context — SD and Serial are safe here.
 // File opened once per batch to minimise slow SPI open/close cycles.
+// Rotates to a new file automatically after MAX_LOG_ENTRIES records.
 void flushQueueToSD() {
   LogEntry entry;
   File     logFile;
@@ -195,6 +225,15 @@ void flushQueueToSD() {
                      (int)entry.rssi,
                      (unsigned int)entry.frame_type,
                      macStr);
+
+      logEntryCount++;
+
+      // Rotate log file when entry limit is reached
+      if (logEntryCount >= MAX_LOG_ENTRIES) {
+        logFile.close();
+        isFileOpen = false;
+        rotateLogFile();
+      }
     } else {
       Serial.println("ERROR: log file append failed");
       neopixelWrite(LED_PIN, 200, 0, 0);
@@ -279,13 +318,13 @@ void setup() {
 
   // Initialize Wi-Fi in promiscuous (monitor) mode
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-  if (!checkEsp(esp_wifi_init(&cfg),                          "esp_wifi_init"))         while (true) delay(1000);
-  if (!checkEsp(esp_wifi_set_storage(WIFI_STORAGE_RAM),       "esp_wifi_set_storage"))  while (true) delay(1000);
-  if (!checkEsp(esp_wifi_set_mode(WIFI_MODE_NULL),            "esp_wifi_set_mode"))     while (true) delay(1000);
-  if (!checkEsp(esp_wifi_start(),                             "esp_wifi_start"))        while (true) delay(1000);
-  if (!checkEsp(esp_wifi_set_ps(WIFI_PS_NONE),                "esp_wifi_set_ps"))       while (true) delay(1000);
+  if (!checkEsp(esp_wifi_init(&cfg),                           "esp_wifi_init"))         while (true) delay(1000);
+  if (!checkEsp(esp_wifi_set_storage(WIFI_STORAGE_RAM),        "esp_wifi_set_storage"))  while (true) delay(1000);
+  if (!checkEsp(esp_wifi_set_mode(WIFI_MODE_NULL),             "esp_wifi_set_mode"))     while (true) delay(1000);
+  if (!checkEsp(esp_wifi_start(),                              "esp_wifi_start"))        while (true) delay(1000);
+  if (!checkEsp(esp_wifi_set_ps(WIFI_PS_NONE),                 "esp_wifi_set_ps"))       while (true) delay(1000);
   if (!checkEsp(esp_wifi_set_promiscuous_rx_cb(&snifferCallback), "set_promiscuous_cb")) while (true) delay(1000);
-  if (!checkEsp(esp_wifi_set_promiscuous(true),               "set_promiscuous"))       while (true) delay(1000);
+  if (!checkEsp(esp_wifi_set_promiscuous(true),                "set_promiscuous"))       while (true) delay(1000);
 
   // Discard packets captured during setup() to keep Serial output clean
   xQueueReset(logQueue);
