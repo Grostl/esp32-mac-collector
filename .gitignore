@@ -9,6 +9,9 @@ build/
 *.elf
 *.bin
 *.hex
+*.map
+*.csv
+*.json
 
 # SD card log files — never commit captured data
 *.csv
