@@ -1,6 +1,6 @@
 # ESP32-C5 MAC Sniffer
 
-> Built by Pavel and Claude, with code review by Gemini and Codex.
+> Built by me and Claude, with code review by Gemini and Codex.
 
 ESP32-C5 based passive Wi-Fi scanner that captures MAC addresses from the air
 and logs them to a MicroSD card as CSV files. Sweeps 2.4 GHz and 5 GHz channels,
