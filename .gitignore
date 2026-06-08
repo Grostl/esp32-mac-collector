@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+
+# Arduino build artifacts
+build/
+*.elf
+*.bin
+*.hex
+
+# SD card log files — never commit captured data
+*.csv
+*.log
