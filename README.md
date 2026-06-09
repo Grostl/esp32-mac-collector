@@ -19,7 +19,7 @@ or interfere with any network or device.
 Always obtain explicit permission from the venue or property owner before deploying
 this device. In many countries, capturing wireless data in public spaces without
 consent may violate privacy laws such as GDPR (EU), CCPA (US), or equivalent
-local regulations. The authors take no responsibility for unlawful use.
+local regulations. The author take no responsibility for unlawful use.
 
 ---
 
