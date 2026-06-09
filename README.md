@@ -1,5 +1,10 @@
 # ESP32-C5 MAC Sniffer
 
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+![Platform](https://img.shields.io/badge/platform-ESP32--C5-blue)
+![Arduino](https://img.shields.io/badge/Arduino-ESP32%20Core%203.x-teal)
+![Band](https://img.shields.io/badge/Wi--Fi-2.4%20%2F%205%20GHz-orange)
+
 > Built by me and Claude, with code review by Gemini and Codex.
 
 ESP32-C5 based passive Wi-Fi scanner that captures MAC addresses from the air
