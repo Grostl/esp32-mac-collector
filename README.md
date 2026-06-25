@@ -76,7 +76,7 @@ The sniffer records five 802.11 frame subtypes:
 
 | Frame type | Hex | Notes |
 |---|---|---|
-| Probe Request | `0x40` | Sent by devices scanning for networks. Modern OS (iOS 14+, Android 10+) use randomised MACs here — filter these out in the converter when uploading to ad platforms |
+| Probe Request | `0x40` | Sent by devices scanning for networks. Modern OS (iOS 14+, Android 10+) use randomised MACs here |
 | Data | `0x08` | Sent by devices actively connected to a network — real hardware MAC |
 | QoS Data | `0x88` | Same as Data, QoS variant |
 | Null | `0x48` | Power-save signalling from a connected device — real hardware MAC |
