@@ -1,7 +1,4 @@
-#include <BLEDevice.h>
-#include <BLEUtils.h>
-#include <BLEScan.h>
-#include <BLEAdvertisedDevice.h>
+#include <NimBLEDevice.h>
 
 #include "Arduino.h"
 #include "esp_wifi.h"
@@ -176,17 +173,17 @@ bool checkEsp(esp_err_t result, const char* operation) {
 }
 
 // --- BLE Sniffer Callback ---
-// Runs in FreeRTOS task context — xQueueSend is safe here.
+// Runs in NimBLE task context — xQueueSend is safe here.
 // Only logs public MACs; random/resolvable addresses are useless for Yandex.
-// Standard ESP32 BLE stores address bytes LSB-first; reversed to match WiFi MAC order.
-class BLECallback : public BLEAdvertisedDeviceCallbacks {
-  void onResult(BLEAdvertisedDevice adv) override {
-    if (adv.getAddressType() != BLE_ADDR_PUBLIC) return;
+// NimBLE stores address bytes LSB-first; reversed to match WiFi MAC order.
+class BLECallback : public NimBLEAdvertisedDeviceCallbacks {
+  void onResult(NimBLEAdvertisedDevice* adv) override {
+    if (adv->getAddressType() != BLE_ADDR_PUBLIC) return;
 
-    int8_t rssi = (int8_t)adv.getRSSI();
+    int8_t rssi = adv->getRSSI();
     if (rssi <= MIN_RSSI_DBM) return;
 
-    const uint8_t* native = adv.getAddress().getNative(); // [0]=LSB, [5]=MSB
+    const uint8_t* native = adv->getAddress().getNative(); // [0]=LSB, [5]=MSB
     uint8_t mac[6];
     for (int i = 0; i < 6; i++) mac[i] = native[5 - i];  // reverse to MSB-first
 
@@ -203,15 +200,6 @@ class BLECallback : public BLEAdvertisedDeviceCallbacks {
     ledOnUntilMs = entry.time_ms + LED_FLASH_MS;
   }
 };
-
-// Separate task: BLEScan::start() blocks for the scan duration, so it needs its own stack.
-void bleTaskFunc(void* arg) {
-  BLEScan* scan = (BLEScan*)arg;
-  while (true) {
-    scan->start(30, false); // block for 30 s, then restart
-    scan->clearResults();
-  }
-}
 
 // --- Promiscuous Sniffer Callback ---
 // Runs in the Wi-Fi task context — keep it fast.
@@ -383,10 +371,10 @@ void setup() {
   }
   if (!checkEsp(nvsResult, "nvs_flash_init")) while (true) delay(1000);
 
-  // BLE controller must be initialised before WiFi claims the RF in promiscuous mode.
-  // BLEDevice::init() sets up the coexistence layer; WiFi init respects it afterwards.
-  BLEDevice::init("");
-  BLEScan* bleScan = BLEDevice::getScan();
+  // NimBLE is the only supported BLE stack on ESP32-C5.
+  // Init before WiFi so the coexistence layer is in place before WiFi claims the RF.
+  NimBLEDevice::init("");
+  NimBLEScan* bleScan = NimBLEDevice::getScan();
   bleScan->setAdvertisedDeviceCallbacks(new BLECallback(), false);
   bleScan->setActiveScan(false); // passive: listen only, no scan requests sent
   bleScan->setInterval(100);
@@ -409,8 +397,8 @@ void setup() {
   // Discard packets captured during setup() to keep Serial output clean
   xQueueReset(logQueue);
 
-  // Start BLE scan in a dedicated task — BLEScan::start() blocks for the scan duration
-  xTaskCreate(bleTaskFunc, "ble_scan", 8192, bleScan, 1, nullptr);
+  // NimBLE start(0) is non-blocking — scan runs indefinitely in the background
+  bleScan->start(0, nullptr, false);
 
   Serial.println("Sniffing started!");
 }
