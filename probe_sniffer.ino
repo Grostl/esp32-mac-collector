@@ -185,10 +185,12 @@ void snifferCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
   int8_t rssi = pkt->rx_ctrl.rssi;
   if (rssi <= MIN_RSSI_DBM) return;
 
-  // Level 2: 802.11 frame subtype
-  // 0x40 — Probe Request, 0x08 — Data, 0x88 — QoS Data
+  // Level 2: 802.11 frame subtype.
+  // 0x40 — Probe Request, 0x08 — Data, 0x88 — QoS Data,
+  // 0x48 — Null (power-save), 0xC8 — QoS Null (power-save).
   uint8_t frameType = payload[0];
-  if (frameType != 0x40 && frameType != 0x08 && frameType != 0x88) return;
+  if (frameType != 0x40 && frameType != 0x08 && frameType != 0x88 &&
+      frameType != 0x48 && frameType != 0xC8) return;
 
   // Transmitter MAC starts at byte offset 10
   const uint8_t* mac = &payload[10];
@@ -379,9 +381,9 @@ void loop() {
       continue;
     }
 
-    // Dwell time: 150ms on 2.4 GHz, 250ms on 5 GHz
+    // Dwell time: 300ms on 2.4 GHz (more clients), 200ms on 5 GHz.
     // Active queue drain every 10ms instead of a blocking delay()
-    uint32_t dwellMs  = currentScanningChannel < 14 ? 150 : 250;
+    uint32_t dwellMs  = currentScanningChannel < 14 ? 300 : 200;
     uint32_t dwellEnd = millis() + dwellMs;
 
     while ((int32_t)(dwellEnd - millis()) > 0) {
