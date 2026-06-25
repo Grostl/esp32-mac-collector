@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "freertos/queue.h"
 #include "string.h"
+#include <NimBLEDevice.h>
 
 // --- Pin Configuration ---
 #define SD_MISO  2
@@ -22,6 +23,7 @@
 #define MIN_RSSI_DBM           -95      // Drop frames weaker than this
 #define LED_FLASH_MS           25       // Capture LED flash duration
 #define MAX_LOG_ENTRIES        500000UL // Rotate to a new file after this many records
+#define BLE_FRAME              0xBE    // frame_type value used in CSV for BLE advertisements
 
 // --- Compact Log Record ---
 // MAC stored as 6 raw bytes; formatted string built only when writing to CSV.
@@ -168,6 +170,35 @@ bool checkEsp(esp_err_t result, const char* operation) {
   neopixelWrite(LED_PIN, 200, 0, 0);
   return false;
 }
+
+// --- BLE Sniffer Callback ---
+// Runs in a FreeRTOS task context (not an ISR) — xQueueSend is safe here.
+// Only logs public MACs: random/resolvable BLE addresses are useless for Yandex.
+// getNative() returns bytes LSB-first (BT wire order); reversed to match WiFi MAC order.
+class BLECallback : public NimBLEAdvertisedDeviceCallbacks {
+  void onResult(NimBLEAdvertisedDevice* adv) override {
+    if (adv->getAddressType() != BLE_ADDR_PUBLIC) return;
+
+    int8_t rssi = adv->getRSSI();
+    if (rssi <= MIN_RSSI_DBM) return;
+
+    const uint8_t* native = adv->getAddress().getNative();
+    uint8_t mac[6];
+    for (int i = 0; i < 6; i++) mac[i] = native[5 - i];
+
+    if (!isUsableMac(mac)) return;
+
+    LogEntry entry;
+    entry.time_ms    = millis();
+    entry.channel    = 0; // BLE advertising uses channels 37/38/39, not WiFi channels
+    entry.rssi       = rssi;
+    entry.frame_type = BLE_FRAME;
+    memcpy(entry.mac, mac, 6);
+
+    xQueueSend(logQueue, &entry, 0);
+    ledOnUntilMs = entry.time_ms + LED_FLASH_MS;
+  }
+};
 
 // --- Promiscuous Sniffer Callback ---
 // Runs in the Wi-Fi task context — keep it fast.
@@ -355,6 +386,17 @@ void setup() {
 
   // Discard packets captured during setup() to keep Serial output clean
   xQueueReset(logQueue);
+
+  // BLE — passive scan, public MACs only, runs concurrently with WiFi via coexistence
+  esp_log_level_set("NimBLE", ESP_LOG_NONE);
+  NimBLEDevice::init("");
+  NimBLEScan* bleScan = NimBLEDevice::getScan();
+  bleScan->setAdvertisedDeviceCallbacks(new BLECallback(), false);
+  bleScan->setActiveScan(false); // passive: listen only, no scan requests sent
+  bleScan->setInterval(100);
+  bleScan->setWindow(99);        // near-continuous scan
+  bleScan->start(0, nullptr, false); // 0 = indefinite, non-blocking
+
   Serial.println("Sniffing started!");
 }
 
