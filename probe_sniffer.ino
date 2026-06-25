@@ -181,12 +181,12 @@ bool checkEsp(esp_err_t result, const char* operation) {
 // Standard ESP32 BLE stores address bytes LSB-first; reversed to match WiFi MAC order.
 class BLECallback : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice adv) override {
-    if (adv.getAddressType() != BLE_ADDR_TYPE_PUBLIC) return;
+    if (adv.getAddressType() != BLE_ADDR_PUBLIC) return;
 
     int8_t rssi = (int8_t)adv.getRSSI();
     if (rssi <= MIN_RSSI_DBM) return;
 
-    const uint8_t* native = *adv.getAddress().getNative(); // [0]=LSB, [5]=MSB
+    const uint8_t* native = adv.getAddress().getNative(); // [0]=LSB, [5]=MSB
     uint8_t mac[6];
     for (int i = 0; i < 6; i++) mac[i] = native[5 - i];  // reverse to MSB-first
 
