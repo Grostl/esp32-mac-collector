@@ -1,3 +1,8 @@
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+
 #include "Arduino.h"
 #include "esp_wifi.h"
 #include "SD.h"
@@ -6,7 +11,6 @@
 #include "esp_log.h"
 #include "freertos/queue.h"
 #include "string.h"
-#include <NimBLEDevice.h>
 
 // --- Pin Configuration ---
 #define SD_MISO  2
@@ -172,19 +176,19 @@ bool checkEsp(esp_err_t result, const char* operation) {
 }
 
 // --- BLE Sniffer Callback ---
-// Runs in a FreeRTOS task context (not an ISR) — xQueueSend is safe here.
-// Only logs public MACs: random/resolvable BLE addresses are useless for Yandex.
-// getNative() returns bytes LSB-first (BT wire order); reversed to match WiFi MAC order.
-class BLECallback : public NimBLEAdvertisedDeviceCallbacks {
-  void onResult(NimBLEAdvertisedDevice* adv) override {
-    if (adv->getAddressType() != BLE_ADDR_PUBLIC) return;
+// Runs in FreeRTOS task context — xQueueSend is safe here.
+// Only logs public MACs; random/resolvable addresses are useless for Yandex.
+// Standard ESP32 BLE stores address bytes LSB-first; reversed to match WiFi MAC order.
+class BLECallback : public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice adv) override {
+    if (adv.getAddressType() != BLE_ADDR_TYPE_PUBLIC) return;
 
-    int8_t rssi = adv->getRSSI();
+    int8_t rssi = (int8_t)adv.getRSSI();
     if (rssi <= MIN_RSSI_DBM) return;
 
-    const uint8_t* native = adv->getAddress().getNative();
+    const uint8_t* native = *adv.getAddress().getNative(); // [0]=LSB, [5]=MSB
     uint8_t mac[6];
-    for (int i = 0; i < 6; i++) mac[i] = native[5 - i];
+    for (int i = 0; i < 6; i++) mac[i] = native[5 - i];  // reverse to MSB-first
 
     if (!isUsableMac(mac)) return;
 
@@ -199,6 +203,15 @@ class BLECallback : public NimBLEAdvertisedDeviceCallbacks {
     ledOnUntilMs = entry.time_ms + LED_FLASH_MS;
   }
 };
+
+// Separate task: BLEScan::start() blocks for the scan duration, so it needs its own stack.
+void bleTaskFunc(void* arg) {
+  BLEScan* scan = (BLEScan*)arg;
+  while (true) {
+    scan->start(30, false); // block for 30 s, then restart
+    scan->clearResults();
+  }
+}
 
 // --- Promiscuous Sniffer Callback ---
 // Runs in the Wi-Fi task context — keep it fast.
@@ -388,14 +401,13 @@ void setup() {
   xQueueReset(logQueue);
 
   // BLE — passive scan, public MACs only, runs concurrently with WiFi via coexistence
-  esp_log_level_set("NimBLE", ESP_LOG_NONE);
-  NimBLEDevice::init("");
-  NimBLEScan* bleScan = NimBLEDevice::getScan();
+  BLEDevice::init("");
+  BLEScan* bleScan = BLEDevice::getScan();
   bleScan->setAdvertisedDeviceCallbacks(new BLECallback(), false);
   bleScan->setActiveScan(false); // passive: listen only, no scan requests sent
   bleScan->setInterval(100);
   bleScan->setWindow(99);        // near-continuous scan
-  bleScan->start(0, nullptr, false); // 0 = indefinite, non-blocking
+  xTaskCreate(bleTaskFunc, "ble_scan", 4096, bleScan, 1, nullptr);
 
   Serial.println("Sniffing started!");
 }
