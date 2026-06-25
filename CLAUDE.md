@@ -1,22 +1,24 @@
-# CLAUDE.md — инструкции для Claude
+# CLAUDE.md
 
-## Что делает этот проект
+## What this project does
 
-Пассивный Wi-Fi снифер на ESP32-C5. Захватывает MAC-адреса устройств из эфира и пишет их в CSV на MicroSD карту. Создан для сбора данных для Яндекс Аудиторий — в паре с [yandex-mac-converter](https://github.com/Grostl/yandex-mac-converter).
+Passive Wi-Fi sniffer on ESP32-C5. Captures MAC addresses from the air and writes
+them to CSV files on a MicroSD card. Built for audience data collection for Yandex
+Audiences — pairs with [yandex-mac-converter](https://github.com/Grostl/yandex-mac-converter).
 
-## Структура репозитория
+## Repository structure
 
 ```
-probe_sniffer.ino                        — весь код (один файл)
+probe_sniffer.ino                        — full source (single file)
 build/esp32.esp32.esp32c5/
-  probe_sniffer.ino.bin                  — скомпилированная прошивка
-  probe_sniffer.ino.merged.bin           — merged bin для прошивки через esptool
-  build.options.json                     — параметры последней компиляции
+  probe_sniffer.ino.bin                  — compiled firmware
+  probe_sniffer.ino.merged.bin           — merged binary for esptool flashing
+  build.options.json                     — build parameters from last compile
 ```
 
-## Сборка
+## Build
 
-Arduino CLI, плата ESP32-C5:
+Arduino CLI, ESP32-C5 board:
 
 ```bash
 arduino-cli compile \
@@ -25,45 +27,52 @@ arduino-cli compile \
   .
 ```
 
-Результат коммитится в репозиторий и прикладывается к GitHub Release.
+The resulting `.bin` files are committed to the repository and attached to GitHub Releases.
 
-## Формат выходного CSV
+## Output CSV format
 
-Разделитель `;`, кодировка UTF-8:
+Delimiter `;`, UTF-8 encoding:
 
 ```
 Time_ms;Channel;RSSI;FrameType;MAC
 3889;1;-55;0x88;50:5B:C2:59:86:F2
 ```
 
-Заголовок `Time_ms;Channel;RSSI;FrameType;MAC` используется companion-конвертером для автоопределения формата ESP32 CSV.
+The header `Time_ms;Channel;RSSI;FrameType;MAC` is used by the companion converter
+to auto-detect the ESP32 CSV format and parse frame types per row.
 
-## Захватываемые типы фреймов
+## Captured frame types
 
-| Hex | Тип | MAC реальный? |
-|-----|-----|---------------|
-| `0x40` | Probe Request | Нет — современные устройства рандомизируют MAC при сканировании |
-| `0x08` | Data | Да |
-| `0x88` | QoS Data | Да |
-| `0x48` | Null (power-save) | Да |
-| `0xC8` | QoS Null (power-save) | Да |
+| Hex | Type | Real MAC? |
+|-----|------|-----------|
+| `0x40` | Probe Request | No — modern OS (iOS 14+, Android 10+) randomise the MAC when scanning |
+| `0x08` | Data | Yes |
+| `0x88` | QoS Data | Yes |
+| `0x48` | Null (power-save) | Yes |
+| `0xC8` | QoS Null (power-save) | Yes |
 
-Probe Request логируются для полноты — фильтрация делается на стороне конвертера.
+Probe Requests are logged for completeness; filtering is handled in the companion converter.
 
-## Ключевые детали реализации
+## Key implementation details
 
-- **Callback снифера** (`snifferCallback`) работает в контексте Wi-Fi задачи — там запрещены SD, Serial, snprintf. Только фильтрация и `xQueueSendFromISR`.
-- **Дедупликация** — статический кольцевой буфер `DedupRecord[512]`, один MAC логируется не чаще раза в 30 секунд.
-- **Запись на SD** (`flushQueueToSD`) — в контексте `loop()`, файл открывается один раз на весь батч (до 32 записей), затем закрывается. Это минимизирует медленные SPI-операции open/close.
-- **Ротация лога** — при достижении 500 000 записей создаётся следующий файл (`/log.csv` → `/log_1.csv` → ...).
-- **Обход каналов** — 2.4 ГГц: каналы 1, 6, 11, 13 по 300 мс; 5 ГГц: 16 каналов по 200 мс. DFS-каналы, заблокированные регулятором, пропускаются gracefully.
-- **LED** — callback только выставляет `ledOnUntilMs`, реальный `neopixelWrite` вызывается из `loop()` чтобы не блокировать Wi-Fi задачу.
-- **Валидация MAC** — отбрасываются нулевые, broadcast (FF:FF:...) и multicast (LSB первого байта = 1).
+- **Sniffer callback** (`snifferCallback`) runs in the Wi-Fi task context — no SD, Serial,
+  or snprintf allowed there. Only filtering and `xQueueSendFromISR`.
+- **Deduplication** — static ring buffer `DedupRecord[512]`, one MAC logged at most once
+  per 30 seconds.
+- **SD writes** (`flushQueueToSD`) — runs in `loop()` context. The file is opened once
+  per batch (up to 32 entries) and closed after, minimising slow SPI open/close cycles.
+- **Log rotation** — a new file is created every 500 000 entries (`/log.csv` → `/log_1.csv` → …).
+- **Channel hopping** — 2.4 GHz: channels 1, 6, 11, 13 at 300 ms each; 5 GHz: 16 channels
+  at 200 ms each. DFS channels blocked by regional regulations are skipped gracefully.
+- **LED** — the callback only sets `ledOnUntilMs`; the actual `neopixelWrite` is called
+  from `loop()` to avoid blocking the Wi-Fi task.
+- **MAC validation** — zero MACs, broadcast (FF:FF:…), and multicast (LSB of first byte = 1)
+  are all dropped before enqueueing.
 
-## Пины
+## Pin assignments
 
-| Функция | GPIO |
-|---------|------|
+| Function | GPIO |
+|----------|------|
 | SD MISO | 2 |
 | SD MOSI | 7 |
 | SD SCK | 6 |
