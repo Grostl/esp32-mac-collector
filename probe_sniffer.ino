@@ -383,6 +383,15 @@ void setup() {
   }
   if (!checkEsp(nvsResult, "nvs_flash_init")) while (true) delay(1000);
 
+  // BLE controller must be initialised before WiFi claims the RF in promiscuous mode.
+  // BLEDevice::init() sets up the coexistence layer; WiFi init respects it afterwards.
+  BLEDevice::init("");
+  BLEScan* bleScan = BLEDevice::getScan();
+  bleScan->setAdvertisedDeviceCallbacks(new BLECallback(), false);
+  bleScan->setActiveScan(false); // passive: listen only, no scan requests sent
+  bleScan->setInterval(100);
+  bleScan->setWindow(99);        // near-continuous scan
+
   // Clean up any leftover Wi-Fi state from previous session
   esp_wifi_stop();
   esp_wifi_deinit();
@@ -400,14 +409,8 @@ void setup() {
   // Discard packets captured during setup() to keep Serial output clean
   xQueueReset(logQueue);
 
-  // BLE — passive scan, public MACs only, runs concurrently with WiFi via coexistence
-  BLEDevice::init("");
-  BLEScan* bleScan = BLEDevice::getScan();
-  bleScan->setAdvertisedDeviceCallbacks(new BLECallback(), false);
-  bleScan->setActiveScan(false); // passive: listen only, no scan requests sent
-  bleScan->setInterval(100);
-  bleScan->setWindow(99);        // near-continuous scan
-  xTaskCreate(bleTaskFunc, "ble_scan", 4096, bleScan, 1, nullptr);
+  // Start BLE scan in a dedicated task — BLEScan::start() blocks for the scan duration
+  xTaskCreate(bleTaskFunc, "ble_scan", 8192, bleScan, 1, nullptr);
 
   Serial.println("Sniffing started!");
 }
