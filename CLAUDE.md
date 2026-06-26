@@ -50,24 +50,42 @@ to auto-detect the ESP32 CSV format and parse frame types per row.
 | `0x88` | QoS Data | Yes |
 | `0x48` | Null (power-save) | Yes |
 | `0xC8` | QoS Null (power-save) | Yes |
+| `0xBE` | BLE Advertisement | Yes — only public (non-random) BLE MACs are logged |
 
 Probe Requests are logged for completeness; filtering is handled in the companion converter.
+BLE entries use channel `0` (BLE advertising runs on channels 37/38/39, not Wi-Fi channels).
 
 ## Key implementation details
 
-- **Sniffer callback** (`snifferCallback`) runs in the Wi-Fi task context — no SD, Serial,
-  or snprintf allowed there. Only filtering and `xQueueSendFromISR`.
+- **Wi-Fi sniffer callback** (`snifferCallback`) runs in the Wi-Fi task context — no SD,
+  Serial, or snprintf allowed there. Only filtering and `xQueueSendFromISR`.
+- **BLE sniffer** (`BLECallback`) uses NimBLE-Arduino 3.x (`NimBLEScanCallbacks`). Runs in
+  the NimBLE task context — `xQueueSend` (not FromISR) is used. Only public-address
+  advertisements are captured; random/resolvable BLE MACs are dropped. NimBLE stores
+  address bytes LSB-first; they are reversed to match Wi-Fi MAC byte order before logging.
+- **BLE coexistence** — ESP32-C5 has one shared radio for Wi-Fi and BLE. `NimBLEDevice::init()`
+  must be called before Wi-Fi init so the SW coexistence arbiter is in place. BLE scan duty
+  cycle is 30% (interval=160×0.625 ms, window=48×0.625 ms) to leave headroom for Wi-Fi.
+  Wi-Fi loses ~30% of its airtime to BLE, but this is acceptable for deduplication (one MAC
+  per 30 s window) since devices send probe requests far more frequently than once per 30 s.
 - **Deduplication** — static ring buffer `DedupRecord[512]`, one MAC logged at most once
-  per 30 seconds.
+  per 30 seconds. Shared between Wi-Fi and BLE MACs.
 - **SD writes** (`flushQueueToSD`) — runs in `loop()` context. The file is opened once
   per batch (up to 32 entries) and closed after, minimising slow SPI open/close cycles.
 - **Log rotation** — a new file is created every 500 000 entries (`/log.csv` → `/log_1.csv` → …).
 - **Channel hopping** — 2.4 GHz: channels 1, 6, 11, 13 at 300 ms each; 5 GHz: 16 channels
   at 200 ms each. DFS channels blocked by regional regulations are skipped gracefully.
-- **LED** — the callback only sets `ledOnUntilMs`; the actual `neopixelWrite` is called
-  from `loop()` to avoid blocking the Wi-Fi task.
+- **LED** — callbacks only set `ledOnUntilMs`; the actual `neopixelWrite` is called
+  from `loop()` to avoid blocking Wi-Fi or BLE tasks.
 - **MAC validation** — zero MACs, broadcast (FF:FF:…), and multicast (LSB of first byte = 1)
   are all dropped before enqueueing.
+
+## Dependencies
+
+- [Arduino ESP32 core](https://github.com/espressif/arduino-esp32) 3.x
+- [NimBLE-Arduino](https://github.com/h2zero/NimBLE-Arduino) 3.x — install via Arduino IDE
+  Library Manager (search "NimBLE") or add ZIP from GitHub. Required for BLE scanning;
+  ESP32-C5 does not support the Bluedroid stack.
 
 ## Pin assignments
 

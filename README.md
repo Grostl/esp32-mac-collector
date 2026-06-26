@@ -4,12 +4,14 @@
 ![Platform](https://img.shields.io/badge/platform-ESP32--C5-blue)
 ![Arduino](https://img.shields.io/badge/Arduino-ESP32%20Core%203.x-teal)
 ![Band](https://img.shields.io/badge/Wi--Fi-2.4%20%2F%205%20GHz-orange)
+![BLE](https://img.shields.io/badge/BLE-5.0-purple)
 
 > Built by me and Claude, with code review by Gemini and Codex.
 
-ESP32-C5 based passive Wi-Fi scanner that captures MAC addresses from the air
-and logs them to a MicroSD card as CSV files. Sweeps 2.4 GHz and 5 GHz channels,
-filters duplicate devices, and runs indefinitely with automatic log rotation.
+ESP32-C5 based passive Wi-Fi + BLE scanner that captures MAC addresses from the air
+and logs them to a MicroSD card as CSV files. Sweeps 2.4 GHz and 5 GHz Wi-Fi channels
+and concurrently scans Bluetooth LE advertisements, filters duplicate devices, and runs
+indefinitely with automatic log rotation.
 Starts capturing automatically as soon as USB power is connected — no PC required
 after flashing.
 
@@ -58,13 +60,15 @@ local regulations. The author takes no responsibility for unlawful use.
 
 ## Features
 
-- Passive 2.4 GHz + 5 GHz channel sweep (20 channels)
-- Captures five 802.11 frame subtypes — see [Captured Frame Types](#captured-frame-types) below
+- Passive 2.4 GHz + 5 GHz Wi-Fi channel sweep (20 channels)
+- Concurrent BLE 5.0 passive scan — captures public Bluetooth advertisements
+- Captures five 802.11 frame subtypes + BLE advertisements — see [Captured Frame Types](#captured-frame-types) below
 - 300 ms dwell on 2.4 GHz, 200 ms on 5 GHz (more weight where most clients are)
+- Wi-Fi and BLE share the radio via ESP32-C5 SW coexistence (BLE at 30% duty cycle)
 - Starts automatically on USB power — no PC needed
 - Plug-and-play: insert SD card, apply power, done
 - MAC deduplication — one entry per device per 30 seconds
-- Filters multicast and broadcast — only real unicast devices logged
+- Filters multicast, broadcast, and randomised BLE addresses — only real unicast MACs logged
 - Automatic log rotation at 500 000 entries per file
 - NeoPixel LED status indicators
 
@@ -72,17 +76,18 @@ local regulations. The author takes no responsibility for unlawful use.
 
 ## Captured Frame Types
 
-The sniffer records five 802.11 frame subtypes:
+The sniffer records five 802.11 frame subtypes and BLE advertisements:
 
-| Frame type | Hex | Notes |
-|---|---|---|
-| Probe Request | `0x40` | Sent by devices scanning for networks. Modern OS (iOS 14+, Android 10+) use randomised MACs here |
-| Data | `0x08` | Sent by devices actively connected to a network — real hardware MAC |
-| QoS Data | `0x88` | Same as Data, QoS variant |
-| Null | `0x48` | Power-save signalling from a connected device — real hardware MAC |
-| QoS Null | `0xC8` | Power-save signalling, QoS variant — real hardware MAC |
+| Frame type | Hex | Source | Notes |
+|---|---|---|---|
+| Probe Request | `0x40` | Wi-Fi | Sent by devices scanning for networks. Modern OS randomise the MAC here |
+| Data | `0x08` | Wi-Fi | Sent by devices connected to a network — real hardware MAC |
+| QoS Data | `0x88` | Wi-Fi | Same as Data, QoS variant — real hardware MAC |
+| Null | `0x48` | Wi-Fi | Power-save signalling from connected device — real hardware MAC |
+| QoS Null | `0xC8` | Wi-Fi | Power-save signalling, QoS variant — real hardware MAC |
+| BLE Advertisement | `0xBE` | BLE | Public-address advertisements only — real hardware MAC. Channel logged as `0` |
 
-Data / Null frames yield the most reliable MACs for audience matching.
+Data / Null / BLE frames yield the most reliable MACs for audience matching.
 Probe Requests are logged for completeness and can be excluded in the companion converter.
 
 ---
@@ -139,6 +144,9 @@ A pre-built `.bin` is available in [Releases](../../releases).
 ## Dependencies
 
 - [Arduino ESP32 core](https://github.com/espressif/arduino-esp32) 3.x
+- [NimBLE-Arduino](https://github.com/h2zero/NimBLE-Arduino) 3.x — required for BLE scanning.
+  Install via Arduino IDE Library Manager (search **NimBLE**) or add the ZIP from GitHub.
+  ESP32-C5 uses NimBLE as its BLE stack; the bundled Bluedroid library is not supported on this chip.
 - `SD.h` — included with ESP32 Arduino core
 - `esp_wifi.h` — included with ESP32 Arduino core
 
