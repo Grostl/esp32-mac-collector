@@ -88,7 +88,7 @@ The sniffer records five 802.11 frame subtypes and BLE advertisements:
 | BLE Advertisement | `0xBE` | BLE | Public-address advertisements only — real hardware MAC. Channel logged as `0` |
 
 Data / Null / BLE frames yield the most reliable MACs for audience matching.
-Probe Requests are logged for completeness and can be excluded in the companion converter.
+Probe Requests are logged for completeness and can be filtered out from the log in post-processing.
 
 ---
 
