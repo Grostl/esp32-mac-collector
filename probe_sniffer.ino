@@ -176,16 +176,16 @@ bool checkEsp(esp_err_t result, const char* operation) {
 // Runs in NimBLE task context — xQueueSend is safe here.
 // Only logs public MACs; random/resolvable addresses are useless for Yandex.
 // NimBLE stores address bytes LSB-first; reversed to match WiFi MAC order.
-class BLECallback : public NimBLEAdvertisedDeviceCallbacks {
-  void onResult(NimBLEAdvertisedDevice* adv) override {
-    if (adv->getAddressType() != BLE_ADDR_PUBLIC) return;
+class BLECallback : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice* adv) override {
+    if (adv->getAddress().getType() != BLE_ADDR_PUBLIC) return;
 
     int8_t rssi = adv->getRSSI();
     if (rssi <= MIN_RSSI_DBM) return;
 
-    const uint8_t* native = adv->getAddress().getNative(); // [0]=LSB, [5]=MSB
+    const uint8_t* val = adv->getAddress().getVal(); // [0]=LSB, [5]=MSB
     uint8_t mac[6];
-    for (int i = 0; i < 6; i++) mac[i] = native[5 - i];  // reverse to MSB-first
+    for (int i = 0; i < 6; i++) mac[i] = val[5 - i]; // reverse to MSB-first
 
     if (!isUsableMac(mac)) return;
 
@@ -375,10 +375,10 @@ void setup() {
   // Init before WiFi so the coexistence layer is in place before WiFi claims the RF.
   NimBLEDevice::init("");
   NimBLEScan* bleScan = NimBLEDevice::getScan();
-  bleScan->setAdvertisedDeviceCallbacks(new BLECallback(), false);
+  bleScan->setScanCallbacks(new BLECallback(), false);
   bleScan->setActiveScan(false); // passive: listen only, no scan requests sent
-  bleScan->setInterval(100);
-  bleScan->setWindow(99);        // near-continuous scan
+  bleScan->setInterval(160);     // 100 ms between scan windows
+  bleScan->setWindow(48);        // 30 ms scan — 30% duty cycle, headroom for WiFi coexistence
 
   // Clean up any leftover Wi-Fi state from previous session
   esp_wifi_stop();
@@ -397,8 +397,8 @@ void setup() {
   // Discard packets captured during setup() to keep Serial output clean
   xQueueReset(logQueue);
 
-  // NimBLE start(0) is non-blocking — scan runs indefinitely in the background
-  bleScan->start(0, nullptr, false);
+  // NimBLE 3.x: start(duration, isContinue, restart) — 0 = indefinite, non-blocking
+  bleScan->start(0);
 
   Serial.println("Sniffing started!");
 }
